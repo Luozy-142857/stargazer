@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stargazer · 斜视眼动评估 demo</title>
+    <script>
+      // 模式侦测必须最早执行：在 CSS 生效前打好标记，避免两种界面互相闪一下。
+      // usage = 使用模式（默认，给受试者/孩子/家长）；debug = 调试模式（?mode=debug）。
+      (function () {
+        try {
+          var p = new URLSearchParams(location.search).get("mode");
+          if (p === "debug" || p === "usage") {
+            localStorage.setItem("stargazer-mode", p);
+          } else {
+            p = localStorage.getItem("stargazer-mode");
+          }
+          document.documentElement.dataset.mode = p === "debug" ? "debug" : "usage";
+        } catch (e) {
+          document.documentElement.dataset.mode = "usage";
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="app">
+      <header id="topbar">
+        <div class="brand">
+          <span class="dot"></span>
+          <strong>STARGAZER</strong>
+          <span class="sub">斜视 / 集合不足 · 眼动测量内核</span>
+        </div>
+        <div id="statusPills">
+          <span class="pill" id="pillModel">模型 · 未加载</span>
+          <span class="pill" id="pillCam">摄像头 · 关</span>
+          <span class="pill" id="pillFps">-- fps</span>
+          <span class="pill" id="pillDist">-- cm</span>
+          <span class="pill" id="pillPose">-- / --</span>
+          <a class="modelink" href="?mode=usage" title="切换到受试者界面">使用模式 →</a>
+        </div>
+      </header>
+
+      <main>
+        <section id="stage">
+          <div id="videoWrap">
+            <video id="video" playsinline muted autoplay></video>
+            <canvas id="overlay"></canvas>
+            <div id="stageHint">点击「启动摄像头」开始</div>
+          </div>
+          <div id="readout">
+            <div class="ro-item">
+              <label>左眼（图像）偏斜 · 水平</label>
+              <div class="ro-val"><span id="roDevL">--</span><em>PD</em></div>
+            </div>
+            <div class="ro-item">
+              <label>右眼（图像）偏斜 · 水平</label>
+              <div class="ro-val"><span id="roDevR">--</span><em>PD</em></div>
+            </div>
+            <div class="ro-item">
+              <label>BCEA（1σ，滑动窗口）</label>
+              <div class="ro-val"><span id="roBcea">--</span><em>deg²</em></div>
+            </div>
+            <div class="ro-item">
+              <label>有效帧占比</label>
+              <div class="ro-val"><span id="roQuality">--</span><em>%</em></div>
+            </div>
+          </div>
+        </section>
+
+        <aside id="panel">
+          <nav id="tabs">
+            <button class="tabbtn active" data-tab="device">几何</button>
+            <button class="tabbtn" data-tab="calib">校准</button>
+            <button class="tabbtn" data-tab="tests">测试</button>
+            <button class="tabbtn" data-tab="export">导出</button>
+          </nav>
+
+          <div class="tabpane active" data-pane="device">
+            <p class="hint">
+              屏幕物理尺寸与观看距离决定「像素→角度」的换算，必须实测。
+              浏览器缩放请保持 100%。
+            </p>
+            <label class="field">
+              <span>屏幕对角线（英寸）</span>
+              <input id="inDiag" type="number" step="0.1" min="5" max="90" value="15.6" />
+            </label>
+            <label class="field">
+              <span>观看距离（厘米，用尺量）</span>
+              <input id="inDist" type="number" step="1" min="20" max="200" value="50" />
+            </label>
+            <label class="field">
+              <span>摄像头水平视场角（°）</span>
+              <input id="inFov" type="number" step="1" min="30" max="120" value="65" />
+            </label>
+            <label class="field">
+              <span>受试者瞳距（毫米，仅用于距离校验）</span>
+              <input id="inIpd" type="number" step="1" min="40" max="80" value="58" />
+            </label>
+            <div class="derived" id="derived"></div>
+            <div class="derived" id="diag">诊断…</div>
+            <button class="primary" id="btnCam">启动摄像头</button>
+            <p class="hint tiny">
+              摄像头必须抬到与眼睛同高。平板平放桌面会造成俯视，眼位测量误差会显著变大。
+            </p>
+          </div>
+
+          <div class="tabpane" data-pane="calib">
+            <p class="hint">
+              先做 6.6 秒<b>热身</b>（光点依次走到四角），让受试者学会「光点跳到哪就看到哪」；
+              再走 <b>13 个校准点</b>（约 17 秒），最后 1 个<b>留出验证点</b>。
+            </p>
+            <div class="kv" id="calibState">
+              <span>状态</span><b>未校准</b>
+            </div>
+            <button class="primary" id="btnCalib" disabled>开始 10 点校准</button>
+            <div class="kv" id="calibResidualRow" hidden>
+              <span>拟合残差 RMS</span><b id="calibResidual">--</b>
+            </div>
+            <div class="kv" id="calibLooRow" hidden>
+              <span>交叉验证 中位 / 最大</span><b id="calibLoo">--</b>
+            </div>
+            <div class="kv" id="calibHeldoutRow" hidden>
+              <span>单点留出验证</span><b id="calibHeldout">--</b>
+            </div>
+            <div class="kv" id="calibUncRow" hidden>
+              <span>绝对偏斜不确定度</span><b id="calibUnc">--</b>
+            </div>
+            <div class="derived" id="calibWarn" hidden></div>
+            <p class="hint tiny">
+              <b>交叉验证</b>是主指标（每次扣掉一个点重拟合，共 13 次）。
+              ≤3.0° 良好，3.0–5.0° 可用，&gt;5.0° 建议整轮重做。
+              这套链路的实测区间就在 2–4.5°，不会更低。
+              <b>绝对偏斜量</b>另有一条限制：没有棱镜锚定，跨会话不可比（见 docs/RESULTS.md）。
+            </p>
+          </div>
+
+          <div class="tabpane" data-pane="tests">
+            <p class="hint">
+              所有测试都要求双眼睁开不动，距离保持在校准时的位置。
+            </p>
+            <button class="primary" id="btnDeviation" disabled>偏斜监测（45 秒）</button>
+            <button class="primary" id="btnFixation" disabled>注视稳定性（12 秒）</button>
+            <button class="primary" id="btnPursuit" disabled>水平追随（15 秒）</button>
+            <button class="primary" id="btnRepeat" disabled>重复性（5 轮，约 95 秒）</button>
+            <button class="primary" id="btnStereo">立体视锐度（约 30 次判断）</button>
+            <button class="primary" id="btnStereoCheck">立体视自检（排查通道/串扰）</button>
+            <p class="hint tiny">
+              <b>立体视</b>不看注视精度——只要能分出点点里的凸起，就说明双眼在协同。
+              用方向键选方位（左/上/右/下），Esc 中止。需要戴对应的眼镜。
+            </p>
+            <p class="hint tiny">
+              <b>重复性</b>不需要任何外部器材：同一姿势连测 5 轮，看读数自己跟自己差多少。
+              结果里的 <b>MDC95</b> 是最小可检测变化——低于它的改善与噪声分不开。
+            </p>
+
+            <div class="sect">训练游戏 · 火箭追星星</div>
+            <p class="hint tiny">
+              视线带着火箭飞，追上星星就收集。星星一半只给左眼看、一半只给右眼看，
+              优势眼那一层被压暗。需要一副<b>红青/红绿/红蓝眼镜</b>；
+              没有眼镜时选「无分视」可以只验注视交互。
+            </p>
+            <label class="field">
+              <span>眼镜</span>
+              <select id="gameGlasses">
+                <option value="cyan">红青（标准）</option>
+                <option value="green">红绿</option>
+                <option value="blue">红蓝</option>
+                <option value="none">无分视（没有眼镜时用）</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>优势眼（会被压暗）</span>
+              <select id="gameDominant">
+                <option value="imageRight">右（图像）</option>
+                <option value="imageLeft">左（图像）</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>优势眼对比度</span>
+              <input id="gameRatio" type="number" value="45" min="5" max="100" step="5" />
+            </label>
+            <label class="field">
+              <span>时长</span>
+              <select id="gameDuration">
+                <option value="60">60 秒</option>
+                <option value="120">120 秒</option>
+                <option value="180">180 秒</option>
+              </select>
+            </label>
+            <button class="primary" id="btnGame" disabled>开始训练</button>
+
+            <div class="sect">棱镜对照（验证台用）</div>
+            <p class="hint tiny">
+              在受试者眼前放已知棱镜度，再做一次偏斜监测。程序会把这一次单独存成一份
+              会话文件（caseId 里带档位），最后导出成 <code>ground_truth.csv</code>，
+              直接喂给 <code>validate_offline.py</code>。
+            </p>
+            <label class="field">
+              <span>受检眼</span>
+              <select id="prismEye">
+                <option value="imageRight">右（图像）</option>
+                <option value="imageLeft">左（图像）</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>棱镜度（PD）</span>
+              <input id="prismPd" type="number" value="0" step="5" min="0" max="40" />
+            </label>
+            <label class="field">
+              <span>方向</span>
+              <select id="prismDir">
+                <option value="BO">base-out</option>
+                <option value="BI">base-in</option>
+                <option value="BU">base-up</option>
+                <option value="BD">base-down</option>
+              </select>
+            </label>
+            <label class="field inline">
+              <input id="prismOn" type="checkbox" />
+              <span>下一次偏斜监测记为棱镜档位</span>
+            </label>
+            <button class="primary" id="btnPrismCsv" disabled>导出 ground_truth.csv</button>
+
+            <div id="testResults"></div>
+          </div>
+
+          <div class="tabpane" data-pane="export">
+            <p class="hint">
+              导出的是<b>派生特征与指标</b>，不含任何视频或图像。原始帧率日志可选。
+            </p>
+            <label class="field inline">
+              <input id="inCaseId" type="text" placeholder="受试者编号（如 S001）" />
+            </label>
+            <label class="field inline">
+              <input id="inRawLog" type="checkbox" />
+              <span>附带逐帧原始日志（文件较大）</span>
+            </label>
+            <button class="primary" id="btnPickDir">选择输出文件夹（自动落盘）</button>
+            <div class="hint tiny" id="outDirLabel">未选择时走浏览器下载</div>
+            <button class="primary" id="btnExport" disabled>导出整个会话 JSON</button>
+          </div>
+        </aside>
+      </main>
+
+      <div id="toast"></div>
+      <div id="fatal"></div>
+    </div>
+
+    <!-- ================= 使用模式（受试者/孩子/家长） ================= -->
+    <div id="usageRoot">
+      <header id="uTop">
+        <div class="brand">
+          <span class="dot"></span>
+          <strong>火箭追星星</strong>
+          <span class="sub">斜视训练</span>
+        </div>
+        <div class="u-top-right">
+          <span class="pill" id="uPill">准备中</span>
+          <a class="modelink" href="?mode=debug" title="切换到开发者界面">调试模式 →</a>
+        </div>
+      </header>
+
+      <div id="uSteps">
+        <span class="u-step active" data-step="1"><i>1</i>准备</span>
+        <span class="u-step" data-step="2"><i>2</i>校准</span>
+        <span class="u-step" data-step="3"><i>3</i>游戏</span>
+      </div>
+
+      <main id="uMain">
+        <section class="u-screen active" id="uScrWelcome">
+          <div class="u-card">
+            <h1>用眼睛，开火箭</h1>
+            <p class="u-lead">追上只属于你每只眼睛的星星。<br />每天几分钟，偷懒的那只眼会慢慢被叫醒。</p>
+            <div class="u-checklist">
+              <div class="u-check">
+                <svg viewBox="0 0 24 16" class="u-ico"><circle cx="6" cy="10" r="4.4"/><circle cx="18" cy="10" r="4.4"/><path d="M6 10h12" /></svg>
+                <div><b>戴好眼镜</b><p>红青（或红绿/红蓝）分视眼镜，红色镜片戴在左眼</p></div>
+              </div>
+              <div class="u-check">
+                <svg viewBox="0 0 24 16" class="u-ico"><rect x="3" y="3" width="18" height="12" rx="2.5"/><circle cx="12" cy="9" r="3.4"/><path d="M9 3l1.4-2h3.2L15 3" /></svg>
+                <div><b>坐姿端正</b><p>摄像头与眼睛同高，距离用尺量准</p></div>
+              </div>
+              <div class="u-check">
+                <svg viewBox="0 0 24 16" class="u-ico"><circle cx="12" cy="9" r="6.4"/><path d="M12 5.4V9l2.6 1.8" /></svg>
+                <div><b>大约 5 分钟</b><p>准备 1 分钟 · 校准 1 分钟 · 游戏 1–3 分钟</p></div>
+              </div>
+            </div>
+            <button class="u-btn big" id="uBtnWelcome">开始准备</button>
+          </div>
+        </section>
+
+        <section class="u-screen" id="uScrSetup">
+          <div class="u-card">
+            <h2>三个小设置</h2>
+            <label class="u-field">
+              <span>你戴的眼镜</span>
+              <select id="uGlasses">
+                <option value="cyan" selected>红青眼镜</option>
+                <option value="green">红绿眼镜</option>
+                <option value="blue">红蓝眼镜</option>
+                <option value="none">没有眼镜（先试试）</option>
+              </select>
+            </label>
+            <label class="u-field">
+              <span>哪只眼睛更有优势</span>
+              <select id="uDominant">
+                <option value="imageRight" selected>右眼</option>
+                <option value="imageLeft">左眼</option>
+                <option value="unknown">不确定 / 没测过</option>
+              </select>
+            </label>
+            <p class="u-hint">不确定就选「不确定」。优势眼看到的星星会暗一点，逼着另一只眼工作。</p>
+            <div class="u-row">
+              <label class="u-field">
+                <span>屏幕对角线（英寸）</span>
+                <input id="uDiag" type="number" step="0.1" min="5" max="90" value="15.6" />
+              </label>
+              <label class="u-field">
+                <span>观看距离（厘米）</span>
+                <input id="uDist" type="number" step="1" min="20" max="200" value="50" />
+              </label>
+            </div>
+            <p class="u-hint">笔记本屏幕一般 15.6 英寸，台式 23–27 英寸。距离请用尺量——量准了，火箭才跟眼。</p>
+            <label class="u-field">
+              <span>名字或编号（可选，只写进本地保存的文件）</span>
+              <input id="uName" type="text" placeholder="如：小明 / S001" maxlength="24" />
+            </label>
+            <button class="u-btn big" id="uBtnSetup">下一步 · 打开摄像头</button>
+          </div>
+        </section>
+
+        <section class="u-screen" id="uScrCamera">
+          <div class="u-card wide">
+            <h2>坐好后，看着摄像头</h2>
+            <div id="uVideoWrap">
+              <video id="uVideo" playsinline muted autoplay></video>
+              <canvas id="uOverlay"></canvas>
+              <div id="uVideoHint">正在打开摄像头…</div>
+            </div>
+            <div id="uLivePills">
+              <span class="pill" id="uPillFace">正在找脸…</span>
+              <span class="pill" id="uPillDist">-- cm</span>
+              <span class="pill" id="uPillPose">姿势 --</span>
+            </div>
+            <ul class="u-tips">
+              <li>摄像头与眼睛同高，设备不够高就用书垫</li>
+              <li>脸正对屏幕，距离 <b id="uDistEcho">50</b> 厘米左右</li>
+              <li>光线均匀，别背对窗户</li>
+            </ul>
+            <button class="u-btn big" id="uBtnCalib" disabled>我准备好了 · 开始校准</button>
+            <button class="u-btn ghost" id="uBtnBackSetup">修改设置</button>
+          </div>
+        </section>
+
+        <section class="u-screen" id="uScrCalib">
+          <div class="u-card" id="uCalibIntro">
+            <h2>第一次校准</h2>
+            <p class="u-lead">屏幕上会出现一串发光的点。<br /><b>眼睛跟着点走，头不要动</b>，每个点只持续一小会儿。</p>
+            <p class="u-hint">先有两次不计分的练习，然后是 13 个校准点，最后 1 个验证点。全程约 1 分钟。</p>
+            <button class="u-btn big" id="uBtnCalibStart">开始</button>
+          </div>
+          <div class="u-card" id="uCalibResult" hidden>
+            <h2 id="uCalibTitle">校准完成</h2>
+            <p class="u-lead" id="uCalibMsg"></p>
+            <div class="u-actions">
+              <button class="u-btn big" id="uBtnToGame">去开火箭</button>
+              <button class="u-btn ghost" id="uBtnRecalib">重新校准</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="u-screen" id="uScrGame">
+          <div class="u-card" id="uGameIntro">
+            <h2>火箭追星星</h2>
+            <p class="u-lead">眼睛盯着星星，火箭就会自己飞过去。<br />星星分两种颜色：一种只有左眼能看到，一种只有右眼。</p>
+            <p class="u-hint">燃料会慢慢减少。燃料不多时，飞回中间的圆形加油站补给——顺便帮眼睛记住中心在哪。</p>
+            <button class="u-btn big" id="uBtnGame">开始游戏</button>
+          </div>
+          <div class="u-card" id="uGameSummary" hidden>
+            <h2 id="uGameTitle">这一局结束</h2>
+            <div class="u-score">
+              <div class="u-score-item"><b id="uSumScore">0</b><span>得分</span></div>
+              <div class="u-score-item"><b id="uSumHits">0</b><span>出现过的星星</span></div>
+              <div class="u-score-item"><b id="uSumFuel">0</b><span>加油次数</span></div>
+            </div>
+            <p class="u-lead" id="uGameMsg"></p>
+            <div class="u-actions">
+              <button class="u-btn big" id="uBtnAgain">再来一局</button>
+              <button class="u-btn ghost" id="uBtnSave">保存记录</button>
+              <button class="u-btn ghost" id="uBtnRecalib2">重新校准</button>
+              <button class="u-btn ghost" id="uBtnFinish">结束</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="u-screen" id="uScrEnd">
+          <div class="u-card">
+            <h2>今天完成啦</h2>
+            <p class="u-lead" id="uEndMsg">记得每天来开火箭。<br />如果保存了记录，把它发给医生看看。</p>
+            <button class="u-btn big" id="uBtnRestart">再来一次</button>
+          </div>
+        </section>
+      </main>
+
+      <div id="uToast"></div>
+    </div>
+
+    <canvas id="testCanvas"></canvas>
+    <div id="testHud">
+      <div id="testPrompt"></div>
+      <div id="testProgress"><i></i></div>
+      <div id="testSub"></div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

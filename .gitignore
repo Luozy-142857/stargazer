@@ -1,0 +1,13 @@
+node_modules/
+.npm-cache/
+dist/
+public/wasm/
+public/models/
+out/
+*.log
+.dsh-*
+*.tmpdir/
+.agent-teams/
+.DS_Store
+__pycache__/
+*.pyc
